@@ -1,0 +1,21 @@
+# Provider plugins and lockfiles are machine-local; `terraform init` rebuilds them.
+.terraform/
+.terraform.lock.hcl
+
+# State holds resource attributes and generated secrets in plaintext — keep it
+# in a remote backend, never in git.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Variable files routinely carry credentials. Commit the .example copies instead.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Plan output can embed variable values.
+*.tfplan
+tfplan
+
+crash.log
+crash.*.log

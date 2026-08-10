@@ -1,0 +1,75 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored and is
+# excluded from VCS pushes, so it never lands in a pull request.
+
+# ── Organisation & billing ───────────────────────────────────────────────────
+# Required.  gcloud billing accounts list
+billing_account_id = "012345-6789AB-CDEF01"
+
+# Preferred over org_id — a folder scopes IAM and policy to just these
+# environments.  gcloud resource-manager folders list --organization=ORG_ID
+folder_id = "123456789012"
+
+# Used only when folder_id is null.  gcloud organizations list
+org_id = null
+
+# ── Naming ───────────────────────────────────────────────────────────────────
+# Project IDs are capped at 30 characters and a random suffix is appended, so
+# keep this short.
+project_prefix      = "synfra-app"
+display_name_prefix = "Synfra App"
+region              = "us-central1"
+
+# ── Environments ─────────────────────────────────────────────────────────────
+# Adding an entry creates a complete project. Removing one deletes only that
+# project — the others are untouched, because this is a for_each over a map.
+environments = {
+  dev = {
+    subnet_cidr    = "10.10.0.0/20"
+    is_production  = false
+    monthly_budget = 100
+    admin_members  = ["group:dev-team@example.com"]
+  }
+
+  test = {
+    subnet_cidr    = "10.20.0.0/20"
+    is_production  = false
+    monthly_budget = 200
+    admin_members  = ["group:qa-team@example.com"]
+  }
+
+  prod = {
+    # Production in a different region from dev/test.
+    region         = "us-east1"
+    subnet_cidr    = "10.30.0.0/20"
+    is_production  = true
+    monthly_budget = 2000
+    # No editors in prod — deploys go through a service account.
+    admin_members  = []
+    viewer_members = ["group:platform-team@example.com"]
+    extra_apis     = ["cloudkms.googleapis.com", "sqladmin.googleapis.com"]
+    labels         = { compliance = "pci" }
+  }
+}
+
+# DELETE lets `terraform destroy` remove non-production projects.
+non_production_deletion_policy = "DELETE"
+
+# ── APIs ─────────────────────────────────────────────────────────────────────
+common_apis = [
+  "compute.googleapis.com",
+  "iam.googleapis.com",
+  "logging.googleapis.com",
+  "monitoring.googleapis.com",
+  "secretmanager.googleapis.com",
+  "storage.googleapis.com",
+  "cloudresourcemanager.googleapis.com",
+]
+
+# ── Budgets ──────────────────────────────────────────────────────────────────
+budget_currency              = "USD"
+budget_notification_channels = []
+
+labels = {
+  owner       = "platform-team"
+  cost-center = "engineering"
+}
