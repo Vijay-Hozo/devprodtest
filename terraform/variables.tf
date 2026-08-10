@@ -1,173 +1,174 @@
-# ── Organisation & billing ───────────────────────────────────────────────────
-
-variable "billing_account_id" {
-  description = "Billing account to attach every project to, e.g. 012345-6789AB-CDEF01. Needs roles/billing.user to attach, and roles/billing.admin to create budgets."
-  type        = string
-
-  validation {
-    condition     = can(regex("^[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$", var.billing_account_id))
-    error_message = "billing_account_id must look like 012345-6789AB-CDEF01."
-  }
-}
-
-variable "folder_id" {
-  description = "Folder to create the projects under, digits only. Preferred over org_id — a folder scopes IAM and policy to just these environments. Leave null to create at organization level."
-  type        = string
-  default     = null
-
-  validation {
-    condition     = var.folder_id == null || can(regex("^[0-9]+$", var.folder_id))
-    error_message = "folder_id must be digits only — strip any 'folders/' prefix."
-  }
-}
-
-variable "org_id" {
-  description = "Organization to create the projects under. Used only when folder_id is null."
-  type        = string
-  default     = null
-
-  validation {
-    condition     = var.org_id == null || can(regex("^[0-9]+$", var.org_id))
-    error_message = "org_id must be digits only."
-  }
-}
-
-# ── Naming ───────────────────────────────────────────────────────────────────
-
-variable "project_prefix" {
-  description = "Prefix for generated project IDs. Kept short — project IDs are capped at 30 characters and a random suffix is appended."
+variable "project_name" {
+  description = "Short project name used to prefix every resource."
   type        = string
   default     = "synfra-app"
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{3,15}$", var.project_prefix))
-    error_message = "project_prefix must be 4-16 characters, start with a lowercase letter, and contain only lowercase letters, digits or hyphens."
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{1,11}$", var.project_name))
+    error_message = "project_name must be 2-12 characters of lowercase letters, digits or hyphens, and start with a letter or digit."
   }
 }
 
-variable "display_name_prefix" {
-  description = "Human-readable prefix for project display names."
+variable "environment" {
+  description = "Deployment environment. Also used in resource names."
   type        = string
-  default     = "Synfra App"
+  default     = "dev"
+
+  validation {
+    condition     = contains(["dev", "test", "staging", "prod"], var.environment)
+    error_message = "environment must be one of: dev, test, staging, prod."
+  }
 }
 
-variable "region" {
-  description = "Default region for any environment that does not set its own."
-  type        = string
-  default     = "us-central1"
-}
-
-variable "labels" {
-  description = "Labels merged onto every project."
+variable "tags" {
+  description = "Extra tags merged onto every resource."
   type        = map(string)
   default     = {}
 }
 
-# ── The environment map ──────────────────────────────────────────────────────
+# ── Regions ──────────────────────────────────────────────────────────────────
 
-variable "environments" {
-  description = <<-EOT
-    Every environment, keyed by name. Adding an entry creates a complete project;
-    removing one deletes just that project.
-
-      region         — region, or null to use var.region
-      subnet_cidr    — subnet range. Must be distinct across environments.
-      is_production  — forces deletion_policy PREVENT and full flow sampling
-      monthly_budget — budget in var.budget_currency, or null for no budget
-      extra_apis     — APIs beyond common_apis for this environment only
-      admin_members  — principals granted roles/editor
-      viewer_members — principals granted roles/viewer
-      labels         — extra labels for this environment only
-  EOT
-
-  type = map(object({
-    region         = optional(string, null)
-    subnet_cidr    = string
-    is_production  = optional(bool, false)
-    monthly_budget = optional(number, null)
-    extra_apis     = optional(list(string), [])
-    admin_members  = optional(list(string), [])
-    viewer_members = optional(list(string), [])
-    labels         = optional(map(string), {})
-  }))
-
-  default = {
-    dev = {
-      subnet_cidr    = "10.10.0.0/20"
-      is_production  = false
-      monthly_budget = 100
-    }
-
-    test = {
-      subnet_cidr    = "10.20.0.0/20"
-      is_production  = false
-      monthly_budget = 200
-    }
-
-    prod = {
-      subnet_cidr    = "10.30.0.0/20"
-      is_production  = true
-      monthly_budget = 2000
-    }
-  }
-
-  validation {
-    condition     = length(var.environments) > 0
-    error_message = "Define at least one environment."
-  }
-
-  validation {
-    condition = alltrue([
-      for name, _ in var.environments : can(regex("^[a-z0-9]{2,10}$", name))
-    ])
-    error_message = "Environment names must be 2-10 lowercase alphanumeric characters — they become part of the project ID."
-  }
-
-  validation {
-    condition = alltrue([
-      for _, env in var.environments : can(cidrhost(env.subnet_cidr, 0))
-    ])
-    error_message = "Every subnet_cidr must be a valid IPv4 CIDR block."
-  }
-}
-
-variable "non_production_deletion_policy" {
-  description = "Deletion policy for non-production projects. DELETE allows `terraform destroy`; PREVENT blocks it. Production is always PREVENT."
+variable "primary_region" {
+  description = "Region that normally serves traffic. Also the default provider's region."
   type        = string
-  default     = "DELETE"
+  default     = "us-east-1"
+}
+
+variable "secondary_region" {
+  description = "Standby (or second active) region. Must differ from primary_region."
+  type        = string
+  default     = "us-west-2"
+}
+
+# ── Networking ───────────────────────────────────────────────────────────────
+
+variable "primary_vpc_cidr" {
+  description = "CIDR for the primary region's VPC. Must not overlap the secondary."
+  type        = string
+  default     = "10.0.0.0/16"
 
   validation {
-    condition     = contains(["DELETE", "PREVENT", "ABANDON"], var.non_production_deletion_policy)
-    error_message = "non_production_deletion_policy must be DELETE, PREVENT or ABANDON."
+    condition     = can(cidrhost(var.primary_vpc_cidr, 0))
+    error_message = "primary_vpc_cidr must be a valid IPv4 CIDR block."
   }
 }
 
-# ── APIs ─────────────────────────────────────────────────────────────────────
-
-variable "common_apis" {
-  description = "APIs enabled in every environment. Nothing on GCP works until its API is on, and enablement is per-project."
-  type        = list(string)
-  default = [
-    "compute.googleapis.com",
-    "iam.googleapis.com",
-    "logging.googleapis.com",
-    "monitoring.googleapis.com",
-    "secretmanager.googleapis.com",
-    "storage.googleapis.com",
-    "cloudresourcemanager.googleapis.com",
-  ]
-}
-
-# ── Budgets ──────────────────────────────────────────────────────────────────
-
-variable "budget_currency" {
-  description = "Currency code for budget amounts. Must match the billing account's currency."
+variable "secondary_vpc_cidr" {
+  description = "CIDR for the secondary region's VPC. Must not overlap the primary — overlapping ranges cannot be peered."
   type        = string
-  default     = "USD"
+  default     = "10.1.0.0/16"
+
+  validation {
+    condition     = can(cidrhost(var.secondary_vpc_cidr, 0))
+    error_message = "secondary_vpc_cidr must be a valid IPv4 CIDR block."
+  }
 }
 
-variable "budget_notification_channels" {
-  description = "Cloud Monitoring notification channel IDs to alert. Billing account admins are notified regardless."
-  type        = list(string)
-  default     = []
+variable "enable_vpc_peering" {
+  description = "Peer the two VPCs. Only needed if workloads must reach private addresses across regions — S3 replication and DynamoDB global tables do not require it."
+  type        = bool
+  default     = false
+}
+
+# ── Storage ──────────────────────────────────────────────────────────────────
+
+variable "replica_storage_class" {
+  description = "Storage class for replicated objects. STANDARD_IA cuts standby cost; use STANDARD for active-active."
+  type        = string
+  default     = "STANDARD_IA"
+
+  validation {
+    condition = contains(
+      ["STANDARD", "STANDARD_IA", "ONEZONE_IA", "INTELLIGENT_TIERING", "GLACIER_IR"],
+      var.replica_storage_class,
+    )
+    error_message = "replica_storage_class must be a valid S3 storage class."
+  }
+}
+
+variable "force_destroy" {
+  description = "Allow `terraform destroy` to delete buckets that still hold objects. Leave false for anything you care about."
+  type        = bool
+  default     = false
+}
+
+# ── Database ─────────────────────────────────────────────────────────────────
+
+variable "dynamodb_billing_mode" {
+  description = "PAY_PER_REQUEST or PROVISIONED. On-demand is easier to reason about across regions."
+  type        = string
+  default     = "PAY_PER_REQUEST"
+
+  validation {
+    condition     = contains(["PAY_PER_REQUEST", "PROVISIONED"], var.dynamodb_billing_mode)
+    error_message = "dynamodb_billing_mode must be PAY_PER_REQUEST or PROVISIONED."
+  }
+}
+
+variable "dynamodb_read_capacity" {
+  description = "Read capacity units. Ignored unless dynamodb_billing_mode is PROVISIONED."
+  type        = number
+  default     = 5
+}
+
+variable "dynamodb_write_capacity" {
+  description = "Write capacity units. Ignored unless dynamodb_billing_mode is PROVISIONED."
+  type        = number
+  default     = 5
+}
+
+variable "enable_point_in_time_recovery" {
+  description = "Continuous backups with 35-day restore, in both regions."
+  type        = bool
+  default     = true
+}
+
+variable "enable_deletion_protection" {
+  description = "Block accidental deletion of the table."
+  type        = bool
+  default     = false
+}
+
+# ── DNS failover ─────────────────────────────────────────────────────────────
+
+variable "enable_dns_failover" {
+  description = "Create Route 53 health checks and failover records. Requires hosted_zone_id and both endpoints. Without this, nothing routes traffic between the regions."
+  type        = bool
+  default     = false
+}
+
+variable "hosted_zone_id" {
+  description = "Route 53 hosted zone to create the failover records in. Required when enable_dns_failover is true."
+  type        = string
+  default     = null
+}
+
+variable "dns_record_name" {
+  description = "Fully-qualified record name, e.g. app.example.com."
+  type        = string
+  default     = null
+}
+
+variable "primary_endpoint" {
+  description = "Hostname the primary region serves on — typically a load balancer DNS name."
+  type        = string
+  default     = null
+}
+
+variable "secondary_endpoint" {
+  description = "Hostname the secondary region serves on."
+  type        = string
+  default     = null
+}
+
+variable "health_check_path" {
+  description = "Path the Route 53 health checks request. Must return 2xx/3xx only when the region can actually serve traffic."
+  type        = string
+  default     = "/health"
+}
+
+variable "dns_ttl" {
+  description = "TTL in seconds for the failover records. Lower means faster failover but more DNS queries."
+  type        = number
+  default     = 60
 }

@@ -1,75 +1,43 @@
 # Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored and is
 # excluded from VCS pushes, so it never lands in a pull request.
 
-# ── Organisation & billing ───────────────────────────────────────────────────
-# Required.  gcloud billing accounts list
-billing_account_id = "012345-6789AB-CDEF01"
+project_name = "synfra-app"
+environment  = "dev"
 
-# Preferred over org_id — a folder scopes IAM and policy to just these
-# environments.  gcloud resource-manager folders list --organization=ORG_ID
-folder_id = "123456789012"
+# ── Regions ──────────────────────────────────────────────────────────────────
+primary_region   = "us-east-1"
+secondary_region = "us-west-2"
 
-# Used only when folder_id is null.  gcloud organizations list
-org_id = null
+# Must not overlap — overlapping ranges cannot be peered.
+primary_vpc_cidr   = "10.0.0.0/16"
+secondary_vpc_cidr = "10.1.0.0/16"
 
-# ── Naming ───────────────────────────────────────────────────────────────────
-# Project IDs are capped at 30 characters and a random suffix is appended, so
-# keep this short.
-project_prefix      = "synfra-app"
-display_name_prefix = "Synfra App"
-region              = "us-central1"
+# Only needed if workloads must reach private addresses across regions. S3
+# replication and DynamoDB global tables do NOT require it.
+enable_vpc_peering = false
 
-# ── Environments ─────────────────────────────────────────────────────────────
-# Adding an entry creates a complete project. Removing one deletes only that
-# project — the others are untouched, because this is a for_each over a map.
-environments = {
-  dev = {
-    subnet_cidr    = "10.10.0.0/20"
-    is_production  = false
-    monthly_budget = 100
-    admin_members  = ["group:dev-team@example.com"]
-  }
+# ── Storage ──────────────────────────────────────────────────────────────────
+# STANDARD_IA keeps standby storage cheap. Use STANDARD for active-active.
+replica_storage_class = "STANDARD_IA"
+force_destroy         = false
 
-  test = {
-    subnet_cidr    = "10.20.0.0/20"
-    is_production  = false
-    monthly_budget = 200
-    admin_members  = ["group:qa-team@example.com"]
-  }
+# ── Database ─────────────────────────────────────────────────────────────────
+dynamodb_billing_mode         = "PAY_PER_REQUEST"
+enable_point_in_time_recovery = true
 
-  prod = {
-    # Production in a different region from dev/test.
-    region         = "us-east1"
-    subnet_cidr    = "10.30.0.0/20"
-    is_production  = true
-    monthly_budget = 2000
-    # No editors in prod — deploys go through a service account.
-    admin_members  = []
-    viewer_members = ["group:platform-team@example.com"]
-    extra_apis     = ["cloudkms.googleapis.com", "sqladmin.googleapis.com"]
-    labels         = { compliance = "pci" }
-  }
-}
+# ── DNS failover ─────────────────────────────────────────────────────────────
+# Off by default: it needs a hosted zone you already own. Until you enable it,
+# the two regions exist but nothing routes traffic between them.
+enable_dns_failover = false
 
-# DELETE lets `terraform destroy` remove non-production projects.
-non_production_deletion_policy = "DELETE"
+# hosted_zone_id     = "Z0123456789ABCDEFGHIJ"
+# dns_record_name    = "app.example.com"
+# primary_endpoint   = "primary-alb-123.us-east-1.elb.amazonaws.com"
+# secondary_endpoint = "secondary-alb-456.us-west-2.elb.amazonaws.com"
+# health_check_path  = "/health"
+# dns_ttl            = 60
 
-# ── APIs ─────────────────────────────────────────────────────────────────────
-common_apis = [
-  "compute.googleapis.com",
-  "iam.googleapis.com",
-  "logging.googleapis.com",
-  "monitoring.googleapis.com",
-  "secretmanager.googleapis.com",
-  "storage.googleapis.com",
-  "cloudresourcemanager.googleapis.com",
-]
-
-# ── Budgets ──────────────────────────────────────────────────────────────────
-budget_currency              = "USD"
-budget_notification_channels = []
-
-labels = {
-  owner       = "platform-team"
-  cost-center = "engineering"
+tags = {
+  Owner      = "platform-team"
+  CostCenter = "engineering"
 }
