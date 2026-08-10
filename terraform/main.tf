@@ -1,12 +1,3 @@
-/**
- * Data sources and locals only. Resources live in projects.tf, apis.tf,
- * network.tf and budgets.tf.
- *
- * Everything is driven by `var.environments`. On GCP a project is the real
- * isolation boundary — quotas, IAM, billing and API enablement are all
- * per-project — so one project per environment is stronger separation than
- * Azure's resource groups or AWS's tags.
- */
 
 # Project IDs are globally unique across all of Google Cloud, so a suffix keeps
 # `synfra-app-dev` from colliding with someone else's.
