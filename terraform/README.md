@@ -1,137 +1,140 @@
-# Dev / Test / Prod Projects
+# Multi-Region Architecture
 
-One **GCP project per environment**, created under a folder, each with its own
-APIs, network, IAM and budget — driven from a single map.
+Two regions, with data replicating between them and DNS failover moving traffic
+when one goes down.
 
 ```
-folder/
-├── synfra-app-dev-a1b2c3    vpc-dev   10.10.0.0/20   $100
-├── synfra-app-test-a1b2c3   vpc-test  10.20.0.0/20   $200
-└── synfra-app-prod-a1b2c3   vpc-prod  10.30.0.0/20   $2000  🔒 PREVENT
-        │
-        └─ for_each ─→ projects, APIs, VPCs, subnets, firewalls, IAM, budgets
+                    ┌──────────────────────────┐
+                    │  Route 53 failover        │
+                    │  app.example.com          │
+                    └───────┬──────────┬────────┘
+                     PRIMARY│          │SECONDARY
+                    ┌───────▼──┐   ┌───▼───────┐
+                    │ us-east-1│   │ us-west-2 │
+                    │  VPC     │   │  VPC      │
+                    │  10.0/16 │   │  10.1/16  │
+                    └───┬──────┘   └──────┬────┘
+                        │                 │
+      S3 bucket ────────┼── CRR ──────────┼──► S3 replica
+                        │                 │
+      DynamoDB ◄────────┴─ global table ──┴──► DynamoDB
+                          (writable both ends)
 ```
 
-## Why projects, not one project with prefixes
+## How the provider aliasing works
 
-On GCP the **project is the real isolation boundary**. Quotas, IAM, billing, API
-enablement and audit logs are all per-project, so a runaway dev workload cannot
-exhaust production's quota and a dev IAM grant cannot reach production resources.
+This is the mechanism that makes multi-region possible, and it's the main thing
+to understand before editing:
 
-This is stronger separation than Azure resource groups or AWS tags give you, and
-it is the reason this template is worth more than its Azure equivalent.
-
-## Prerequisites — read this first
-
-Unlike the other templates, this one operates at **organisation level** and needs
-permissions most individual accounts do not have:
-
-| Need | Role | Scope |
-|---|---|---|
-| Create projects | `roles/resourcemanager.projectCreator` | folder or org |
-| Attach billing | `roles/billing.user` | billing account |
-| Create budgets | `roles/billing.admin` | billing account |
-| Set folder IAM | `roles/resourcemanager.folderAdmin` | folder |
-
-**`roles/billing.admin` is the one that usually bites** — budget creation is a
-different permission from project creation, and `budgets.tf` fails without it.
-
-```bash
-gcloud billing accounts list
-gcloud resource-manager folders list --organization=ORG_ID
+```hcl
+provider "aws" { region = var.primary_region }                      # default
+provider "aws" { alias = "primary"   region = var.primary_region }
+provider "aws" { alias = "secondary" region = var.secondary_region }
+provider "aws" { alias = "global"    region = "us-east-1" }
 ```
 
-## What it creates, per environment
+Every resource declares which one it uses:
 
-- **Project** (`projects.tf`) with `auto_create_network = false` — Google's
-  default network spans every region with permissive firewall rules, so we build
-  our own.
-- **APIs** (`apis.tf`) from `common_apis` plus any `extra_apis`.
-- **Custom-mode VPC and subnet** (`network.tf`) with flow logs and Private Google
-  Access.
-- **Three firewall rules**: internal traffic, IAP SSH/RDP
-  (`35.235.240.0/20`), and an explicit deny-all-ingress at priority 65534.
-- **Project IAM** — `admin_members` get `roles/editor`, `viewer_members` get
-  `roles/viewer`.
-- **Billing budget** (`budgets.tf`) with actual-spend alerts at 50% and 90%, plus
-  a forecast alert at 100%.
+```hcl
+resource "aws_vpc" "secondary" {
+  provider = aws.secondary
+  # ...
+}
+```
 
-## What differs between environments
+**Terraform cannot loop a provider block** — you cannot `for_each` over a list of
+regions. That is why this template handles exactly two regions, and why adding a
+third means adding another alias and another set of resources. It is also why
+`networking.tf` deliberately repeats itself rather than hiding the duplication in
+a module: seeing both blocks makes the aliasing obvious.
 
-Behaviour keys off `is_production`, not the environment's *name*, so a fourth
-environment gets correct treatment with no new code:
+`aws.global` exists because Route 53 and CloudFront are global services whose
+APIs live in `us-east-1`, regardless of where your workload runs.
 
-| | dev / test | prod |
-|---|---|---|
-| `deletion_policy` | `DELETE` | `PREVENT` |
-| Flow log sampling | 0.5 | 1.0 |
-| `criticality` label | `low` | `high` |
-| Budget | $100 / $200 | $2000 |
+## What it creates
+
+**`networking.tf`** — one VPC per region, two private subnets each (carved with
+`cidrsubnet()`), a security group each, and optional cross-region VPC peering.
+
+**`storage.tf`** — two S3 buckets with versioning, public access blocked and
+encryption, plus a least-privilege IAM role and a replication rule copying the
+primary to the secondary. Replication metrics are on, so lag is measurable.
+
+**`database.tf`** — a DynamoDB global table: one resource with a `replica` block,
+writable in **both** regions and converging automatically.
+
+**`dns.tf`** — Route 53 health checks on both endpoints and a PRIMARY/SECONDARY
+failover record pair.
 
 ## Getting started
 
 ```bash
 cd terraform
-cp terraform.tfvars.example terraform.tfvars   # then set billing + folder
+cp terraform.tfvars.example terraform.tfvars   # then edit
 terraform init
 terraform validate
 terraform plan
 terraform apply
 ```
 
-Add an environment:
+DNS failover is **off by default** because it needs a hosted zone you already own
+and endpoints that exist. Until you enable it, the two regions are stood up but
+nothing routes between them:
 
 ```hcl
-environments = {
-  # ...existing...
-  staging = {
-    subnet_cidr    = "10.40.0.0/20"
-    monthly_budget = 300
-    admin_members  = ["group:qa-team@example.com"]
-  }
-}
+enable_dns_failover = true
+hosted_zone_id      = "Z0123456789ABCDEFGHIJ"
+dns_record_name     = "app.example.com"
+primary_endpoint    = "primary-alb-123.us-east-1.elb.amazonaws.com"
+secondary_endpoint  = "secondary-alb-456.us-west-2.elb.amazonaws.com"
 ```
 
-`terraform plan` shows additions only — nothing existing is touched.
+## What this gives you, and what it doesn't
+
+| | |
+|---|---|
+| **S3 RPO** | Typically seconds to minutes. CRR is asynchronous — a region lost mid-replication loses in-flight objects. The 15-minute metrics threshold makes lag visible. |
+| **DynamoDB RPO** | Sub-second, and writable in both regions. Conflicts resolve last-writer-wins, so design for idempotency. |
+| **RTO** | DNS TTL (60s) + health check threshold (3 × 30s) ≈ **90-150 seconds**. |
+
+**Not included, and needed for a real DR posture:**
+
+- **Compute.** The VPCs and security groups exist but nothing runs in them. Add
+  an ASG or ECS service per region — with `provider = aws.primary` /
+  `aws.secondary`.
+- **RDS cross-region read replicas**, if you need a relational database. DynamoDB
+  global tables are the easy path; RDS is not.
+- **A tested failover runbook.** Untested DR is not DR.
 
 ## Notes
 
-- **`for_each` over a map, not `count` over a list.** With `count`, removing
-  `test` would renumber `prod` and Terraform would **delete and recreate** it.
-  Recreating a GCP project is not minor: deletion is a **30-day soft delete**
-  during which the project ID cannot be reused.
-- **Project IDs are globally unique** across all of Google Cloud and capped at 30
-  characters, hence `random_id.project_suffix` and the `substr()`.
-- **`deletion_policy = "PREVENT"` on production blocks `terraform destroy`.**
-  Change it and apply before any intentional teardown.
-- **`disable_on_destroy = false` on APIs** is deliberate: disabling an API can
-  break resources still running in the project, and Terraform cannot tell whether
-  anything depends on it.
-- **Subnet ranges must be distinct.** A `check` block asserts it at plan time —
-  overlapping ranges cannot be peered to a hub or joined by a VPN later, and
-  finding that out months in is expensive.
-- **`roles/editor` is broad.** It is a reasonable starting point for a dev team in
-  their own project, but production deliberately has no editors in the example —
-  deploys go through a service account instead.
-- **Budgets alert, they do not enforce.** Nothing stops when a threshold is
-  crossed. Both actual and forecast rules are configured because the forecast one
-  arrives early enough to act on.
-- The provider has **no `project`** set, because this configuration creates
-  projects rather than deploying into one.
-
-## Before production
-
-| Change | Why |
-|---|---|
-| **Org policies** on the folder (`constraints/compute.vmExternalIpAccess`, allowed regions) | Enforce rather than merely alert |
-| Replace `roles/editor` with **narrow custom roles** | Editor can modify almost anything |
-| **Separate state per environment** | A mistake in dev cannot corrupt prod's state |
-| **Shared VPC** from a host project | Central network control, no peering mesh |
-| **Log sink** to a central logging project | Audit trail outside the project being audited |
-| Remote state (uncomment `backend "gcs"`) | Team-safe state with locking |
+- **Versioning is mandatory for replication** on both buckets — it is how CRR
+  tracks what to copy. Do not disable it.
+- **Replication is not retroactive.** Only objects written *after* the rule is
+  created are copied. Use S3 Batch Replication for pre-existing data.
+- **`delete_marker_replication` is enabled.** Deletes propagate as delete
+  markers. If you would rather the replica retain deleted objects, disable it —
+  but then the buckets diverge.
+- **Peering is off by default.** Neither S3 replication nor DynamoDB global tables
+  need it; they use the AWS backbone. Turn it on only for private cross-region
+  traffic.
+- **A cross-region peering needs both sides**, which is why there is both a
+  `aws_vpc_peering_connection` (primary) and an `aws_vpc_peering_connection_accepter`
+  (secondary).
+- `ignore_changes = [read_capacity, write_capacity]` on the table: under
+  `PAY_PER_REQUEST`, AWS reports capacity values Terraform never set, which would
+  otherwise show as permanent drift.
+- The `check` block asserts the two VPC CIDRs differ — a cheap guard against a
+  copy-paste that would make peering impossible.
 
 ## Cost
 
-The resources here are **free**: projects, VPCs, subnets, firewall rules, API
-enablement and budgets carry no charge. Cost arrives with what you deploy into
-them — the budgets exist so that becomes visible before the invoice does.
+Multi-region roughly doubles infrastructure cost, and adds:
+
+- **Cross-region replication transfer** — ~$0.02/GB out of the primary region.
+  This is usually the surprise line.
+- **DynamoDB replicated writes** — billed as write units in *both* regions.
+- **Route 53 health checks** — ~$0.50/month each.
+
+At defaults with no compute, the standing cost is small (two empty VPCs are free;
+S3 and DynamoDB are usage-billed). The cost arrives with traffic and data volume.
