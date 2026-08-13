@@ -1,52 +1,54 @@
+/**
+ * Data sources and locals only. Resources live in networking.tf, storage.tf,
+ * database.tf and dns.tf.
+ */
 
-# Project IDs are globally unique across all of Google Cloud, so a suffix keeps
-# `synfra-app-dev` from colliding with someone else's.
-resource "random_id" "project_suffix" {
-  byte_length = 3
+data "aws_availability_zones" "primary" {
+  provider = aws.primary
+  state    = "available"
+}
+
+data "aws_availability_zones" "secondary" {
+  provider = aws.secondary
+  state    = "available"
+}
+
+# Bucket names are globally unique across all of AWS, and the two replica
+# buckets need distinct names.
+resource "random_id" "suffix" {
+  byte_length = 4
 }
 
 locals {
-  environments = {
-    for name, cfg in var.environments : name => merge(cfg, {
-      # Project IDs are capped at 30 characters.
-      project_id   = substr("${var.project_prefix}-${name}-${random_id.project_suffix.hex}", 0, 30)
-      project_name = "${var.display_name_prefix} ${upper(name)}"
+  name_prefix = "${var.project_name}-${var.environment}"
 
-      labels = merge(
-        {
-          environment = name
-          managed_by  = "terraform"
-          template    = "gcp-environments"
-          criticality = cfg.is_production ? "high" : "low"
-        },
-        var.labels,
-        cfg.labels,
-      )
-    })
-  }
+  primary_azs   = slice(data.aws_availability_zones.primary.names, 0, 2)
+  secondary_azs = slice(data.aws_availability_zones.secondary.names, 0, 2)
 
-  # Flatten environment × API so one resource enables every service everywhere.
-  project_apis = merge([
-    for env_name, env in local.environments : {
-      for api in distinct(concat(var.common_apis, env.extra_apis)) :
-      "${env_name}/${api}" => {
-        environment = env_name
-        api         = api
-      }
-    }
-  ]...)
+  primary_bucket_name   = "${local.name_prefix}-${var.primary_region}-${random_id.suffix.hex}"
+  secondary_bucket_name = "${local.name_prefix}-${var.secondary_region}-${random_id.suffix.hex}"
 
-  production_environments = [
-    for name, env in local.environments : name if env.is_production
-  ]
+  common_tags = merge(
+    {
+      Project     = var.project_name
+      Environment = var.environment
+      ManagedBy   = "Terraform"
+      Template    = "aws-multi-region"
+    },
+    var.tags,
+  )
+
+  primary_tags   = merge(local.common_tags, { Region = var.primary_region, Role = "primary" })
+  secondary_tags = merge(local.common_tags, { Region = var.secondary_region, Role = "secondary" })
 }
 
-# Overlapping ranges cannot be peered to a hub or joined by a VPN later.
-check "unique_subnet_ranges" {
+# Non-overlapping CIDRs are a hard requirement if the two regions are ever
+# peered or joined to a transit gateway.
+check "non_overlapping_vpc_cidrs" {
   assert {
-    condition = length(distinct([
-      for env in local.environments : env.subnet_cidr
-    ])) == length(local.environments)
-    error_message = "Every environment needs a distinct subnet_cidr — overlapping ranges cannot be peered."
+    condition = (
+      cidrhost(var.primary_vpc_cidr, 0) != cidrhost(var.secondary_vpc_cidr, 0)
+    )
+    error_message = "primary_vpc_cidr and secondary_vpc_cidr must not be the same range — overlapping CIDRs cannot be peered."
   }
 }
