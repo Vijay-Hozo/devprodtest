@@ -8,10 +8,10 @@ data "aws_availability_zones" "primary" {
   state    = "available"
 }
 
-data "aws_availability_zones" "secondary" {
-  provider = aws.secondary
-  state    = "available"
-}
+# data "aws_availability_zones" "secondary" {
+#   provider = aws.secondary
+#   state    = "available"
+# }
 
 # Bucket names are globally unique across all of AWS, and the two replica
 # buckets need distinct names.
